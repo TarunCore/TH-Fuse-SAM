@@ -94,14 +94,7 @@ class Fusenet(nn.Module):
         self.ctrans3 = Channel(size=32, embed_dim=128, patch_size=16, channel=64)
         self.strans3 = Spatial(size=256, embed_dim=1024*2, patch_size=4, channel=64)
 
-        # Added layer to adjust semantic map channels if needed
-        self.semantic_adapter = ConvLayer(1, 64, 1, 1) # Adapts 1-channel semantic map to 64 channels like x3
-
-    def forward(self, vi, ir, sem_map_vi, sem_map_ir):
-        # Combine semantic maps (e.g., element-wise max)
-        # Assuming sem_map_vi and sem_map_ir are [B, 1, H, W]
-        combined_sem_map = torch.max(sem_map_vi, sem_map_ir)
-
+    def forward(self, vi, ir):
         f0 = torch.cat([vi, ir], dim=1)
         x = self.conv_in1(f0)
         x = self.conv_in(x) 
@@ -123,16 +116,7 @@ class Fusenet(nn.Module):
         x2 = self.en2(self.down1(x1)) 
         x3 = self.en3(self.down1(x2)) 
 
-        # Resize semantic map to match x3's spatial dimensions
-        sem_map_resized = F.interpolate(combined_sem_map, size=x3.shape[2:], mode='nearest')
-
-        # Adapt semantic map channels and apply guidance
-        sem_guidance = self.semantic_adapter(sem_map_resized)
-        x3_guided = x3 * sem_guidance # Element-wise multiplication for guidance
-
-        # Feed guided features into transformer
-        x3t = self.strans3(self.ctrans3(x3_guided)) # Use x3_guided here
-
+        x3t = self.strans3(self.ctrans3(x3)) 
         x3m = x3t 
         x3r = x3 * x3m
         x2m = self.up1(x3m) 
