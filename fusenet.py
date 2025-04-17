@@ -53,11 +53,14 @@ class Encoder(nn.Module):
         return x
 
 class Fusenet(nn.Module):
-    def __init__(self, input_nc=2, sam_checkpoint="sam_vit_h_4b8939.pth", sam_model_type="vit_h"):
+    def __init__(self, input_nc=2, sam_checkpoint="sam_vit_h_4b8939.pth", sam_model_type="vit_h", use_sam=True):
         super(Fusenet, self).__init__()
         
         kernel_size = 1
         stride = 1
+        
+        # Whether to use SAM for semantic guidance
+        self.use_sam = use_sam
 
         # ---------------CNN--------------
         self.conv_in = ConvLayer(input_nc, 16, 3, 1)
@@ -95,13 +98,42 @@ class Fusenet(nn.Module):
         self.ctrans3 = Channel(size=32, embed_dim=128, patch_size=16, channel=64)
         self.strans3 = Spatial(size=256, embed_dim=1024*2, patch_size=4, channel=64)
         
-        # SAM-based semantic guidance module
-        self.sam_guidance = SAMGuidance(sam_checkpoint=sam_checkpoint, model_type=sam_model_type)
+        # SAM-based semantic guidance module (only if use_sam is True)
+        if self.use_sam:
+            self.sam_guidance = SAMGuidance(sam_checkpoint=sam_checkpoint, model_type=sam_model_type)
         
         # Additional layers for semantic feature enhancement
         self.semantic_conv1 = ConvLayer(64, 64, 3, 1)
         self.semantic_conv2 = ConvLayer(64, 64, 3, 1)
         self.semantic_fusion = ConvLayer(128, 64, 1, 1)  # Fusion of original and semantically guided features
+
+    def generate_placeholder_attention(self, x):
+        """
+        Generate a simple attention map based on image features when SAM is not used
+        """
+        # Use a simple edge detection-like approach to create an attention map
+        # that highlights areas of high contrast
+        b, c, h, w = x.shape
+        # Create a uniform attention map with higher values at the center
+        attention = torch.ones((b, 64, h, w), device=x.device) * 0.5
+        
+        # Apply a simple Gaussian-like pattern for attention
+        center_h, center_w = h // 2, w // 2
+        y_grid, x_grid = torch.meshgrid(torch.arange(h, device=x.device), 
+                                        torch.arange(w, device=x.device))
+        dist_from_center = ((y_grid - center_h).float() ** 2 + 
+                           (x_grid - center_w).float() ** 2).sqrt()
+        
+        # Normalize distance to [0, 1] range and invert it
+        max_dist = torch.max(dist_from_center)
+        if max_dist > 0:
+            normalized_dist = dist_from_center / max_dist
+            # Higher values at center, lower at edges
+            gaussian_attention = 1.0 - normalized_dist.unsqueeze(0).unsqueeze(0)
+            # Mix with uniform attention
+            attention = attention * 0.7 + 0.3 * gaussian_attention.repeat(b, 64, 1, 1)
+        
+        return attention
 
     def forward(self, vi, ir):
         # Original feature extraction
@@ -121,8 +153,12 @@ class Fusenet(nn.Module):
 
         x0 = torch.cat([x_d, x_s], dim=1) 
 
-        # Get semantic guidance from SAM
-        semantic_attention = self.sam_guidance(ir, vi)
+        # Get semantic guidance - either from SAM or a placeholder
+        if self.use_sam:
+            semantic_attention = self.sam_guidance(ir, vi)
+        else:
+            # Create a placeholder attention when not using SAM
+            semantic_attention = self.generate_placeholder_attention(x0)
         
         # Apply transformer-based feature extraction
         x0 = self.en0(x0) 

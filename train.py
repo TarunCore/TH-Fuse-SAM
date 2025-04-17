@@ -23,6 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='SemFuse: Semantic-Aware Infrared and Visible Image Fusion with Transformer Guidance')
     parser.add_argument('--sam_checkpoint', type=str, default='sam_vit_h_4b8939.pth', help='Path to SAM checkpoint')
     parser.add_argument('--sam_model_type', type=str, default='vit_h', choices=['vit_h', 'vit_l', 'vit_b'], help='SAM model type')
+    parser.add_argument('--use_sam', action='store_true', help='Whether to use SAM for semantic guidance. If not set, a placeholder attention will be used.')
     parser.add_argument('--semantic_loss_weight', type=float, default=0.3, help='Weight for semantic loss')
     parser.add_argument('--epochs', type=int, default=args.epochs, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=args.batch_size, help='Batch size')
@@ -56,12 +57,22 @@ def train(image_lists, opt):
     image_mode = 'L'
     
     # Initialize models
-    fusemodel = Fusenet(sam_checkpoint=opt.sam_checkpoint, sam_model_type=opt.sam_model_type) 
+    fusemodel = Fusenet(
+        sam_checkpoint=opt.sam_checkpoint, 
+        sam_model_type=opt.sam_model_type,
+        use_sam=opt.use_sam
+    )
     vgg_ir_model = VggDeep() 
     vgg_vi_model = VggShallow()
 
-    # Create SAM guidance for loss computation
-    sam_guidance = SAMGuidance(sam_checkpoint=opt.sam_checkpoint, model_type=opt.sam_model_type)
+    # Create SAM guidance for loss computation (only if using SAM)
+    if opt.use_sam:
+        print("Training with SAM semantic guidance")
+        sam_guidance = SAMGuidance(sam_checkpoint=opt.sam_checkpoint, model_type=opt.sam_model_type)
+        sam_guidance.cuda()
+    else:
+        print("Training WITHOUT SAM semantic guidance (using placeholder attention)")
+        sam_guidance = None
     
     # Loss functions
     mse_loss = torch.nn.MSELoss() 
@@ -73,7 +84,6 @@ def train(image_lists, opt):
     fusemodel.cuda()
     vgg_ir_model.cuda()
     vgg_vi_model.cuda()
-    sam_guidance.cuda()
 
     tbar = trange(opt.epochs, ncols=150)
     print('Start training for SemFuse...')
@@ -127,17 +137,22 @@ def train(image_lists, opt):
             # Forward pass
             outputs = fusemodel(img_vi, img_ir)
             
-            # Get semantic attention maps for loss computation
-            semantic_attention = sam_guidance(img_ir, img_vi)
-            
-            # Resize outputs to match semantic_attention if needed
-            resized_outputs = F.interpolate(outputs, size=semantic_attention.shape[2:], mode='bilinear', align_corners=True)
-            
-            # Generate semantic attention for fused image
-            fused_semantic = sam_guidance(resized_outputs, resized_outputs)
-            
-            # Calculate semantic consistency loss
-            semantic_loss_value = semantic_loss(fused_semantic, semantic_attention, semantic_attention)
+            # Semantic loss computation (only if using SAM)
+            if opt.use_sam and sam_guidance is not None:
+                # Get semantic attention maps for loss computation
+                semantic_attention = sam_guidance(img_ir, img_vi)
+                
+                # Resize outputs to match semantic_attention if needed
+                resized_outputs = F.interpolate(outputs, size=semantic_attention.shape[2:], mode='bilinear', align_corners=True)
+                
+                # Generate semantic attention for fused image
+                fused_semantic = sam_guidance(resized_outputs, resized_outputs)
+                
+                # Calculate semantic consistency loss
+                semantic_loss_value = semantic_loss(fused_semantic, semantic_attention, semantic_attention)
+            else:
+                # Set a dummy semantic loss if not using SAM
+                semantic_loss_value = torch.tensor(0.0, device=outputs.device)
             
             # Original losses
             ssim_loss_value = 0
@@ -158,8 +173,12 @@ def train(image_lists, opt):
             mse_loss_value /= len(outputs)
             TV_loss_value /= len(outputs)
 
-            # Combined loss with semantic consistency
-            model_loss = ssim_loss_value + 0.05 * mse_loss_value + 0.05 * TV_loss_value + opt.semantic_loss_weight * semantic_loss_value
+            # Combined loss with semantic consistency (if using)
+            if opt.use_sam:
+                model_loss = ssim_loss_value + 0.05 * mse_loss_value + 0.05 * TV_loss_value + opt.semantic_loss_weight * semantic_loss_value
+            else:
+                model_loss = ssim_loss_value + 0.05 * mse_loss_value + 0.05 * TV_loss_value
+
             model_loss.backward() 
             optimizer_model.step() 
 
@@ -193,10 +212,15 @@ def train(image_lists, opt):
             all_semantic_loss += semantic_loss_value.item()
 
             if (batch + 1) % opt.log_interval == 0:
-                mesg = "{}\tEpoch {}:[{}/{}] fusemodel loss: {:.5f} semantic loss: {:.5f}".format(
-                    time.ctime(), e + 1, count, batches,
-                                  all_model_loss / opt.log_interval,
-                                  all_semantic_loss / opt.log_interval)
+                if opt.use_sam:
+                    mesg = "{}\tEpoch {}:[{}/{}] fusemodel loss: {:.5f} semantic loss: {:.5f}".format(
+                        time.ctime(), e + 1, count, batches,
+                                      all_model_loss / opt.log_interval,
+                                      all_semantic_loss / opt.log_interval)
+                else:
+                    mesg = "{}\tEpoch {}:[{}/{}] fusemodel loss: {:.5f}".format(
+                        time.ctime(), e + 1, count, batches,
+                                      all_model_loss / opt.log_interval)
                 tbar.set_description(mesg)
 
                 Loss_model.append(all_model_loss / opt.log_interval)
@@ -211,7 +235,7 @@ def train(image_lists, opt):
             if (batch + 1) % (opt.train_num//opt.batch_size) == 0:
                 fusemodel.eval()
                 fusemodel.cpu()
-                save_model_filename = "SemFuse_Epoch_" + str(e) + "_iters_" + str(count) + ".model"
+                save_model_filename = "SemFuse_Epoch_" + str(e) + "_iters_" + str(count) + ("_withSAM" if opt.use_sam else "_noSAM") + ".model"
                 save_model_path = os.path.join(opt.save_model_path, save_model_filename)
                 torch.save(fusemodel.state_dict(), save_model_path)
                 fusemodel.train()
@@ -219,7 +243,7 @@ def train(image_lists, opt):
                 
     fusemodel.eval()
     fusemodel.cpu()
-    save_model_filename = "SemFuse_Final_epoch_" + str(opt.epochs) + ".model"
+    save_model_filename = "SemFuse_Final_epoch_" + str(opt.epochs) + ("_withSAM" if opt.use_sam else "_noSAM") + ".model"
     save_model_path = os.path.join(opt.save_model_path, save_model_filename)
     torch.save(fusemodel.state_dict(), save_model_path)
 
