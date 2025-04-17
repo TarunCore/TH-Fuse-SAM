@@ -4,7 +4,7 @@ from os import listdir
 import cv2
 from scipy import ndimage
 from torchvision import transforms
-
+from imageio import imread
 def list_images(directory):
     images = []
     names = []
@@ -24,7 +24,7 @@ def list_images(directory):
 
 def get_image(path, height=256, width=256, mode='L'):
     if mode == 'L':
-        image = ndimage.imread(path, mode='L')
+        image = imread(path, pilmode="L")
     if height is not None and width is not None:
         image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
     return image

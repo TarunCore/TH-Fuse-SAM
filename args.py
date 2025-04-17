@@ -6,5 +6,5 @@ train_num = 7601
 learning_rate = 1e-4
 learning_rate_d = 1e-4
 log_interval = 10
-dataset_path = "/path/to/your/own/dataset" 
-save_model_path = "/path/to/your/own/outputs"  
+dataset_path = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/rgb
+save_model_path = "/content/"

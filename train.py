@@ -12,8 +12,7 @@ from os.path import join
 from loss import final_ssim, TV_Loss
 from loss_p import VggDeep,VggShallow
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = '6'
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 def train(image_lists):
 
     image_mode = 'L'
@@ -49,8 +48,8 @@ def train(image_lists):
         count = 0
         for batch in range(batches):
             image_paths = image_set[batch * args.batch_size:(batch * args.batch_size + args.batch_size)]
-            dir1 = "/path/to/your/own/dataset/vi" 
-            dir2 = "/path/to/your/own/dataset/ir" 
+            dir1 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/rgb 
+            dir2 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/ir
             path1 = []
             path2 = []
 
