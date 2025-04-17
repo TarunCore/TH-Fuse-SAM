@@ -5,7 +5,7 @@ import numpy as np
 import time
 from fusenet import Fusenet
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def load_model(path):
     if not os.path.exists(path):
@@ -62,9 +62,9 @@ def fuse_test(model, vi_path, ir_path, output_path_root, index):
 
 
 def main():
-    vi_path = "/path/to/visible"
-    ir_path = "/path/to/infrared"
-    output_path = '/path/to/output'
+    vi_path = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/rgb/108.png
+    ir_path = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/ir/108.png"
+    output_path = "/content/"
     if os.path.exists(output_path) is False:
         os.mkdir(output_path)
     model_path = "/path/to/model"
@@ -76,8 +76,8 @@ def main():
         model = load_model(model_path) 
         for i in range(10):
             index = i + 1
-            visible_path = vi_path + str(index) + '.bmp'
-            infrared_path = ir_path + str(index) + '.bmp'
+            visible_path = vi_path
+            infrared_path = ir_path
             if not os.path.exists(visible_path):
                 print("Visible image does not exist")
                 return
