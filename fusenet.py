@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vit import Channel, Spatial
+from sam_guidance import SAMGuidance
 
 class ConvLayer(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, is_last=False):
@@ -52,7 +53,7 @@ class Encoder(nn.Module):
         return x
 
 class Fusenet(nn.Module):
-    def __init__(self, input_nc=2):
+    def __init__(self, input_nc=2, sam_checkpoint="sam_vit_h_4b8939.pth", sam_model_type="vit_h"):
         super(Fusenet, self).__init__()
         
         kernel_size = 1
@@ -93,8 +94,17 @@ class Fusenet(nn.Module):
 
         self.ctrans3 = Channel(size=32, embed_dim=128, patch_size=16, channel=64)
         self.strans3 = Spatial(size=256, embed_dim=1024*2, patch_size=4, channel=64)
+        
+        # SAM-based semantic guidance module
+        self.sam_guidance = SAMGuidance(sam_checkpoint=sam_checkpoint, model_type=sam_model_type)
+        
+        # Additional layers for semantic feature enhancement
+        self.semantic_conv1 = ConvLayer(64, 64, 3, 1)
+        self.semantic_conv2 = ConvLayer(64, 64, 3, 1)
+        self.semantic_fusion = ConvLayer(128, 64, 1, 1)  # Fusion of original and semantically guided features
 
     def forward(self, vi, ir):
+        # Original feature extraction
         f0 = torch.cat([vi, ir], dim=1)
         x = self.conv_in1(f0)
         x = self.conv_in(x) 
@@ -111,6 +121,10 @@ class Fusenet(nn.Module):
 
         x0 = torch.cat([x_d, x_s], dim=1) 
 
+        # Get semantic guidance from SAM
+        semantic_attention = self.sam_guidance(ir, vi)
+        
+        # Apply transformer-based feature extraction
         x0 = self.en0(x0) 
         x1 = self.en1(self.down1(x0)) 
         x2 = self.en2(self.down1(x1)) 
@@ -118,16 +132,38 @@ class Fusenet(nn.Module):
 
         x3t = self.strans3(self.ctrans3(x3)) 
         x3m = x3t 
-        x3r = x3 * x3m
+        
+        # Apply semantic attention to transformed features
+        # Resize semantic attention to match feature dimensions
+        sem_att_x3 = F.interpolate(semantic_attention, size=x3.shape[2:], mode='bilinear', align_corners=True)
+        # Enhance features with semantic guidance
+        x3r = x3 * x3m * (1 + sem_att_x3)  # Semantically enhanced features
+        
         x2m = self.up1(x3m) 
-        x2r = x2 * x2m 
+        sem_att_x2 = F.interpolate(semantic_attention, size=x2.shape[2:], mode='bilinear', align_corners=True)
+        x2r = x2 * x2m * (1 + sem_att_x2)
+        
         x1m = self.up1(x2m) + self.up2(x3m) 
-        x1r = x1 * x1m 
+        sem_att_x1 = F.interpolate(semantic_attention, size=x1.shape[2:], mode='bilinear', align_corners=True)
+        x1r = x1 * x1m * (1 + sem_att_x1)
+        
         x0m = self.up1(x1m) + self.up2(x2m) + self.up3(x3m) 
-        x0r = x0 * x0m 
+        sem_att_x0 = F.interpolate(semantic_attention, size=x0.shape[2:], mode='bilinear', align_corners=True)
+        x0r = x0 * x0m * (1 + sem_att_x0)
 
-        other =self.up3(x3r) + self.up2(x2r) + self.up1(x1r) + x0r 
-        f1 = self.conv_out(other) 
+        # Process the features with semantic guidance
+        semantic_guided_features = self.semantic_conv1(self.up3(x3r) + self.up2(x2r) + self.up1(x1r) + x0r)
+        semantic_guided_features = self.semantic_conv2(semantic_guided_features)
+        
+        # Original feature pathway
+        original_features = self.up3(x3r) + self.up2(x2r) + self.up1(x1r) + x0r
+        
+        # Combine both pathways
+        combined_features = torch.cat([original_features, semantic_guided_features], dim=1)
+        other = self.semantic_fusion(combined_features)
+        
+        # Final output
+        f1 = self.conv_out(other)
 
         return f1
          
