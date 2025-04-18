@@ -3,13 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from segment_anything import sam_model_registry, SamPredictor
 import numpy as np
+import os
+import time
 
 class SAMGuidance(nn.Module):
     """
     Class to integrate Segment Anything Model (SAM) for semantic guidance
     in infrared and visible image fusion.
     """
-    def __init__(self, sam_checkpoint="sam_vit_h_4b8939.pth", model_type="vit_h", device="cuda"):
+    def __init__(self, sam_checkpoint="sam_vit_h_4b8939.pth", model_type="vit_h", device="cuda", 
+                 cache_dir=None, downsample_factor=2, use_cache=True):
         super(SAMGuidance, self).__init__()
         
         # Load SAM model
@@ -26,11 +29,57 @@ class SAMGuidance(nn.Module):
         self.guidance_conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
         self.guidance_bn3 = nn.BatchNorm2d(64)
         
+        # Caching system
+        self.use_cache = use_cache
+        self.cache_dir = cache_dir
+        if cache_dir and not os.path.exists(cache_dir):
+            os.makedirs(cache_dir, exist_ok=True)
+        
+        # Image fingerprinting for cache lookup
+        self.cached_fingerprints = {}
+        self.cached_masks = {}
+        self.cache_hits = 0
+        self.cache_misses = 0
+        
+        # Downsample factor to reduce computation time
+        self.downsample_factor = downsample_factor
+        
+    def get_image_fingerprint(self, img):
+        """
+        Create a simple fingerprint for an image to use as cache key
+        """
+        if isinstance(img, torch.Tensor):
+            # Use mean and std as a simple fingerprint
+            if img.dim() == 4:  # Batch format
+                # Take the first image in batch
+                img_flat = img[0].flatten()
+                return f"{img_flat.mean().item():.4f}_{img_flat.std().item():.4f}_{img.shape[2]}_{img.shape[3]}"
+            else:
+                img_flat = img.flatten()
+                return f"{img_flat.mean().item():.4f}_{img_flat.std().item():.4f}_{img.shape[1]}_{img.shape[2]}"
+        return None
+    
     def get_sam_masks(self, ir_img, vi_img):
         """
         Generate SAM masks for both infrared and visible images
         Returns semantic segmentation masks
         """
+        # Check cache first if enabled
+        ir_fingerprint = self.get_image_fingerprint(ir_img) if self.use_cache else None
+        vi_fingerprint = self.get_image_fingerprint(vi_img) if self.use_cache else None
+        
+        # Try to retrieve from cache
+        ir_mask_tensor = None
+        vi_mask_tensor = None
+        
+        if self.use_cache and ir_fingerprint in self.cached_masks and vi_fingerprint in self.cached_masks:
+            self.cache_hits += 1
+            ir_mask_tensor = self.cached_masks[ir_fingerprint]
+            vi_mask_tensor = self.cached_masks[vi_fingerprint]
+            return ir_mask_tensor, vi_mask_tensor
+        
+        self.cache_misses += 1
+        
         # Convert to numpy for SAM if needed
         if isinstance(ir_img, torch.Tensor):
             # Handle single-channel grayscale images (B, 1, H, W)
@@ -67,42 +116,89 @@ class SAMGuidance(nn.Module):
         else:
             vi_np = vi_np.astype(np.uint8)
         
+        # Downsample images for faster processing
+        if self.downsample_factor > 1:
+            original_shape = ir_np.shape[:2]
+            new_h, new_w = original_shape[0] // self.downsample_factor, original_shape[1] // self.downsample_factor
+            ir_np_small = np.array(torch.nn.functional.interpolate(torch.from_numpy(ir_np).permute(2, 0, 1).unsqueeze(0), 
+                                                                   size=(new_h, new_w), 
+                                                                   mode='bilinear', 
+                                                                   align_corners=False)[0].permute(1, 2, 0).numpy(), 
+                                    dtype=np.uint8)
+            vi_np_small = np.array(torch.nn.functional.interpolate(torch.from_numpy(vi_np).permute(2, 0, 1).unsqueeze(0), 
+                                                                   size=(new_h, new_w), 
+                                                                   mode='bilinear', 
+                                                                   align_corners=False)[0].permute(1, 2, 0).numpy(), 
+                                    dtype=np.uint8)
+        else:
+            ir_np_small = ir_np
+            vi_np_small = vi_np
+            original_shape = ir_np.shape[:2]
+            
         # Get masks using SAM in fully automatic mode
         try:
-            self.predictor.set_image(ir_np)
+            start_time = time.time()
+            self.predictor.set_image(ir_np_small)
             ir_masks, _, _ = self.predictor.predict(
                 point_coords=None,
                 point_labels=None,
                 box=None,
                 multimask_output=True
             )
-        except Exception as e:
-            print(f"Error processing IR image with SAM: {e}")
-            # Create a fallback mask if SAM fails
-            h, w = ir_np.shape[:2]
-            ir_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
-        
-        try:
-            self.predictor.set_image(vi_np)
+            if self.downsample_factor > 1:
+                # Upsample masks back to original size
+                ir_masks_list = []
+                for mask in ir_masks:
+                    mask_tensor = torch.from_numpy(mask).float().unsqueeze(0).unsqueeze(0)
+                    upsampled_mask = F.interpolate(mask_tensor, size=original_shape, mode='bilinear', align_corners=False)
+                    ir_masks_list.append(upsampled_mask[0, 0].numpy())
+                ir_masks = np.stack(ir_masks_list)
+            ir_time = time.time() - start_time
+            
+            start_time = time.time()
+            self.predictor.set_image(vi_np_small)
             vi_masks, _, _ = self.predictor.predict(
                 point_coords=None,
                 point_labels=None,
                 box=None,
                 multimask_output=True
             )
+            if self.downsample_factor > 1:
+                # Upsample masks back to original size
+                vi_masks_list = []
+                for mask in vi_masks:
+                    mask_tensor = torch.from_numpy(mask).float().unsqueeze(0).unsqueeze(0)
+                    upsampled_mask = F.interpolate(mask_tensor, size=original_shape, mode='bilinear', align_corners=False)
+                    vi_masks_list.append(upsampled_mask[0, 0].numpy())
+                vi_masks = np.stack(vi_masks_list)
+            vi_time = time.time() - start_time
+            
+            print(f"SAM processing times - IR: {ir_time:.2f}s, VI: {vi_time:.2f}s")
+            
         except Exception as e:
-            print(f"Error processing VI image with SAM: {e}")
-            # Create a fallback mask if SAM fails
-            h, w = vi_np.shape[:2]
+            print(f"Error processing with SAM: {e}")
+            # Create fallback masks if SAM fails
+            h, w = ir_np.shape[:2]
+            ir_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
             vi_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
         
         # Combine masks to get the most informative ones
         ir_mask = self.combine_masks(ir_masks)
         vi_mask = self.combine_masks(vi_masks)
         
-        # Convert back to tensors
+        # Convert to tensors
         ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+        
+        # Cache the results if enabled
+        if self.use_cache:
+            self.cached_masks[ir_fingerprint] = ir_mask_tensor
+            self.cached_masks[vi_fingerprint] = vi_mask_tensor
+            
+            # Print cache statistics occasionally
+            if (self.cache_hits + self.cache_misses) % 100 == 0:
+                hit_rate = (self.cache_hits / (self.cache_hits + self.cache_misses)) * 100
+                print(f"SAM cache stats - Hits: {self.cache_hits}, Misses: {self.cache_misses}, Hit rate: {hit_rate:.1f}%")
         
         return ir_mask_tensor, vi_mask_tensor
     

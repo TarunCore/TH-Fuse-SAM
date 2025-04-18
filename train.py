@@ -35,6 +35,11 @@ def parse_args():
     parser.add_argument('--train_num', type=int, default=args.train_num, help='Number of training samples')
     parser.add_argument('--image_height', type=int, default=args.image_height, help='Image height')
     parser.add_argument('--image_width', type=int, default=args.image_width, help='Image width')
+    # SAM optimization parameters
+    parser.add_argument('--sam_downsample_factor', type=int, default=2, help='Downsample factor for SAM input images (2-4 recommended)')
+    parser.add_argument('--sam_cache_dir', type=str, default='sam_cache', help='Directory to cache SAM predictions')
+    parser.add_argument('--use_sam_cache', action='store_true', help='Whether to use caching for SAM predictions')
+    parser.add_argument('--sam_update_freq', type=int, default=1, help='How often to run SAM (1=every batch, 10=every 10 batches)')
     return parser.parse_args()
 
 # Semantic consistency loss
@@ -68,8 +73,18 @@ def train(image_lists, opt):
     # Create SAM guidance for loss computation (only if using SAM)
     if opt.use_sam:
         print("Training with SAM semantic guidance")
-        sam_guidance = SAMGuidance(sam_checkpoint=opt.sam_checkpoint, model_type=opt.sam_model_type)
+        print(f"SAM parameters: downsample={opt.sam_downsample_factor}, update_freq={opt.sam_update_freq}, use_cache={opt.use_sam_cache}")
+        sam_guidance = SAMGuidance(
+            sam_checkpoint=opt.sam_checkpoint, 
+            model_type=opt.sam_model_type,
+            use_cache=opt.use_sam_cache,
+            cache_dir=opt.sam_cache_dir,
+            downsample_factor=opt.sam_downsample_factor
+        )
         sam_guidance.cuda()
+        
+        # Store semantic attention maps for reuse
+        last_semantic_attention = None
     else:
         print("Training WITHOUT SAM semantic guidance (using placeholder attention)")
         sam_guidance = None
@@ -100,6 +115,9 @@ def train(image_lists, opt):
     all_vi_feature_loss = 0. 
     all_semantic_loss = 0.
     save_num = 0
+    
+    # Initialize global batch counter for SAM update frequency
+    global_batch_count = 0
 
     for e in tbar:
         print('Epoch %d.....' % e)
@@ -107,6 +125,7 @@ def train(image_lists, opt):
         fusemodel.train()
         count = 0
         for batch in range(batches):
+            global_batch_count += 1
             image_paths = image_set[batch * opt.batch_size:(batch * opt.batch_size + opt.batch_size)]
             dir1 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/rgb" 
             dir2 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/ir"
@@ -139,17 +158,37 @@ def train(image_lists, opt):
             
             # Semantic loss computation (only if using SAM)
             if opt.use_sam and sam_guidance is not None:
-                # Get semantic attention maps for loss computation
-                semantic_attention = sam_guidance(img_ir, img_vi)
+                # Only run SAM if it's time to update (based on frequency)
+                should_run_sam = global_batch_count % opt.sam_update_freq == 0
+                
+                if should_run_sam:
+                    # Get semantic attention maps for loss computation
+                    semantic_attention = sam_guidance(img_ir, img_vi)
+                    # Store for future use
+                    last_semantic_attention = semantic_attention
+                else:
+                    # Reuse the last computed attention map
+                    semantic_attention = last_semantic_attention
+                    if semantic_attention is None:
+                        # If no previous attention map exists, compute it now
+                        semantic_attention = sam_guidance(img_ir, img_vi)
+                        last_semantic_attention = semantic_attention
                 
                 # Resize outputs to match semantic_attention if needed
                 resized_outputs = F.interpolate(outputs, size=semantic_attention.shape[2:], mode='bilinear', align_corners=True)
                 
-                # Generate semantic attention for fused image
-                fused_semantic = sam_guidance(resized_outputs, resized_outputs)
+                # For the fused semantic computation, we only run it if we're running SAM this batch
+                if should_run_sam:
+                    # Generate semantic attention for fused image
+                    fused_semantic = sam_guidance(resized_outputs, resized_outputs)
+                    # Calculate semantic consistency loss
+                    semantic_loss_value = semantic_loss(fused_semantic, semantic_attention, semantic_attention)
+                else:
+                    # Reuse previous semantic loss value
+                    semantic_loss_value = last_semantic_loss_value if 'last_semantic_loss_value' in locals() else torch.tensor(0.0, device=outputs.device)
                 
-                # Calculate semantic consistency loss
-                semantic_loss_value = semantic_loss(fused_semantic, semantic_attention, semantic_attention)
+                # Store for next batch that skips SAM computation
+                last_semantic_loss_value = semantic_loss_value
             else:
                 # Set a dummy semantic loss if not using SAM
                 semantic_loss_value = torch.tensor(0.0, device=outputs.device)

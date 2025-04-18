@@ -53,7 +53,8 @@ class Encoder(nn.Module):
         return x
 
 class Fusenet(nn.Module):
-    def __init__(self, input_nc=2, sam_checkpoint="sam_vit_h_4b8939.pth", sam_model_type="vit_h", use_sam=True):
+    def __init__(self, input_nc=2, sam_checkpoint="sam_vit_h_4b8939.pth", sam_model_type="vit_h", 
+                 use_sam=True, sam_downsample_factor=2, use_sam_cache=True, sam_cache_dir="sam_cache"):
         super(Fusenet, self).__init__()
         
         kernel_size = 1
@@ -100,12 +101,21 @@ class Fusenet(nn.Module):
         
         # SAM-based semantic guidance module (only if use_sam is True)
         if self.use_sam:
-            self.sam_guidance = SAMGuidance(sam_checkpoint=sam_checkpoint, model_type=sam_model_type)
+            self.sam_guidance = SAMGuidance(
+                sam_checkpoint=sam_checkpoint, 
+                model_type=sam_model_type,
+                use_cache=use_sam_cache,
+                cache_dir=sam_cache_dir,
+                downsample_factor=sam_downsample_factor
+            )
         
         # Additional layers for semantic feature enhancement
         self.semantic_conv1 = ConvLayer(64, 64, 3, 1)
         self.semantic_conv2 = ConvLayer(64, 64, 3, 1)
         self.semantic_fusion = ConvLayer(128, 64, 1, 1)  # Fusion of original and semantically guided features
+        
+        # Initialize cached semantic attention
+        self.cached_semantic_attention = None
 
     def generate_placeholder_attention(self, x):
         """
@@ -134,8 +144,22 @@ class Fusenet(nn.Module):
             attention = attention * 0.7 + 0.3 * gaussian_attention.repeat(b, 64, 1, 1)
         
         return attention
+        
+    def update_sam_attention(self, vi, ir, force_update=False):
+        """
+        Update semantic attention using SAM (can be called separately from forward)
+        """
+        # Only update if we're using SAM
+        if not self.use_sam:
+            return None
+        
+        # If force update or no cached attention, compute it
+        if force_update or self.cached_semantic_attention is None:
+            self.cached_semantic_attention = self.sam_guidance(ir, vi)
+            
+        return self.cached_semantic_attention
 
-    def forward(self, vi, ir):
+    def forward(self, vi, ir, use_cached_attention=True):
         # Original feature extraction
         f0 = torch.cat([vi, ir], dim=1)
         x = self.conv_in1(f0)
@@ -155,7 +179,10 @@ class Fusenet(nn.Module):
 
         # Get semantic guidance - either from SAM or a placeholder
         if self.use_sam:
-            semantic_attention = self.sam_guidance(ir, vi)
+            if use_cached_attention and self.cached_semantic_attention is not None:
+                semantic_attention = self.cached_semantic_attention
+            else:
+                semantic_attention = self.update_sam_attention(vi, ir, force_update=True)
         else:
             # Create a placeholder attention when not using SAM
             semantic_attention = self.generate_placeholder_attention(x0)
