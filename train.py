@@ -108,8 +108,8 @@ def train(image_lists, opt):
         count = 0
         for batch in range(batches):
             image_paths = image_set[batch * opt.batch_size:(batch * opt.batch_size + opt.batch_size)]
-            dir1 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/rgb" 
-            dir2 = "/content/visible-infrared-wildfire-experiment/m300_grabbed_data_1_51.2/m300_grabbed_data_1_51.2/ir"
+            dir1 = "/content/kaist-dataset/set00/V000/visible" 
+            dir2 = "/content/kaist-dataset/set00/V000/lwir"
             path1 = []
             path2 = []
 
