@@ -2,9 +2,11 @@ import torch
 import numpy as np
 from os import listdir
 import cv2
+import os
 from scipy import ndimage
 from torchvision import transforms
 from imageio import imread
+
 def list_images(directory):
     images = []
     names = []
@@ -22,27 +24,43 @@ def list_images(directory):
         names.append(name1[0])
     return images
 
-def get_image(path, height=256, width=256, mode='L'):
+def get_img(path, mode='L'):
+    """Load an image and return both the image array and associated filename"""
     if mode == 'L':
         image = imread(path, pilmode="L")
-    if height is not None and width is not None:
-        image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
-    return image
+    
+    # Extract filename without extension for mask lookup
+    filename = os.path.basename(path).split('.')[0]
+    
+    return image, filename
 
 def get_train_images_auto(paths, height=256, width=256, mode='RGB'):
     if isinstance(paths, str):
         paths = [paths]
     images = []
+    filenames = []
+    
     for path in paths:
-        image = get_image(path, height, width, mode=mode)
+        image, filename = get_img(path, mode=mode)
+        
+        # Resize if needed
+        if height is not None and width is not None:
+            image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+            
         if mode == 'L':
             image = np.reshape(image, [1, image.shape[0], image.shape[1]])
         else:
             image = np.reshape(image, [image.shape[2], image.shape[0], image.shape[1]])
+        
         images.append(image)
+        filenames.append(filename)
 
     images = np.stack(images, axis=0)
     images = torch.from_numpy(images).float()
+    
+    # Attach filenames as attribute to tensor for later use with precomputed masks
+    images.filenames = filenames
+    
     return images
 
 def get_test_images(paths, height=None, width=None, mode='L'):
@@ -50,8 +68,15 @@ def get_test_images(paths, height=None, width=None, mode='L'):
     if isinstance(paths, str):
         paths = [paths]
     images = []
+    filenames = []
+    
     for path in paths:
-        image = get_image(path, height, width, mode=mode) 
+        image, filename = get_img(path, mode=mode) 
+        
+        # Resize if needed
+        if height is not None and width is not None:
+            image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
+            
         w, h = image.shape[0], image.shape[1]
         w_s = 256 - w % 256
         h_s = 256 - h % 256
@@ -61,9 +86,16 @@ def get_test_images(paths, height=None, width=None, mode='L'):
             image = np.reshape(image, [1, image.shape[0], image.shape[1]])
         else:
             image = ImageToTensor(image).float().numpy()*255
-    images.append(image)
+            
+        images.append(image)
+        filenames.append(filename)
+        
     images = np.stack(images, axis=0)
     images = torch.from_numpy(images).float()
+    
+    # Attach filenames as attribute to tensor for later use with precomputed masks
+    images.filenames = filenames
+    
     return images
 
 def save_images(path, data, out):

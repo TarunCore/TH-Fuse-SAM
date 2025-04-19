@@ -3,20 +3,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from segment_anything import sam_model_registry, SamPredictor
 import numpy as np
+import os
 
 class SAMGuidance(nn.Module):
     """
     Class to integrate Segment Anything Model (SAM) for semantic guidance
     in infrared and visible image fusion.
     """
-    def __init__(self, sam_checkpoint="sam_vit_h_4b8939.pth", model_type="vit_h", device="cuda"):
+    def __init__(self, sam_checkpoint="sam_vit_h_4b8939.pth", model_type="vit_h", device="cuda", precomputed_masks_dir=None):
         super(SAMGuidance, self).__init__()
         
-        # Load SAM model
+        self.precomputed_masks_dir = precomputed_masks_dir
         self.device = device
-        self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-        self.sam.to(device=device)
-        self.predictor = SamPredictor(self.sam)
+        
+        # Only load SAM model if we're not using precomputed masks
+        if precomputed_masks_dir is None:
+            print("Loading SAM model for on-the-fly mask generation")
+            # Load SAM model
+            self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+            self.sam.to(device=device)
+            self.predictor = SamPredictor(self.sam)
+        else:
+            print(f"Using precomputed masks from {precomputed_masks_dir}")
+            self.sam = None
+            self.predictor = None
         
         # Guidance network
         self.guidance_conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
@@ -31,6 +41,39 @@ class SAMGuidance(nn.Module):
         Generate SAM masks for both infrared and visible images
         Returns semantic segmentation masks
         """
+        # Try to use precomputed masks if available
+        if self.precomputed_masks_dir is not None:
+            # Get filenames from tensor metadata or create a placeholder
+            if hasattr(ir_img, 'filename') and hasattr(vi_img, 'filename'):
+                ir_filename = ir_img.filename
+                vi_filename = vi_img.filename
+                
+                # Load precomputed masks
+                ir_mask_path = os.path.join(self.precomputed_masks_dir, 'ir', f"{ir_filename}.npy")
+                vi_mask_path = os.path.join(self.precomputed_masks_dir, 'vi', f"{vi_filename}.npy")
+                
+                if os.path.exists(ir_mask_path) and os.path.exists(vi_mask_path):
+                    ir_mask = np.load(ir_mask_path)
+                    vi_mask = np.load(vi_mask_path)
+                    
+                    # Convert to tensors
+                    ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+                    vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+                    
+                    return ir_mask_tensor, vi_mask_tensor
+            
+            # If we couldn't load precomputed masks, fall back to generated placeholder masks
+            print("Warning: Could not load precomputed masks, using placeholder masks")
+            h, w = ir_img.shape[-2], ir_img.shape[-1]
+            ir_mask = np.ones((h, w), dtype=np.float32) * 0.5
+            vi_mask = np.ones((h, w), dtype=np.float32) * 0.5
+            
+            ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+            vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+            
+            return ir_mask_tensor, vi_mask_tensor
+            
+        # Original on-the-fly mask generation
         # Convert to numpy for SAM if needed
         if isinstance(ir_img, torch.Tensor):
             # Handle single-channel grayscale images (B, 1, H, W)

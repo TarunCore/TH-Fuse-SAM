@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument('--sam_checkpoint', type=str, default='sam_vit_h_4b8939.pth', help='Path to SAM checkpoint')
     parser.add_argument('--sam_model_type', type=str, default='vit_h', choices=['vit_h', 'vit_l', 'vit_b'], help='SAM model type')
     parser.add_argument('--use_sam', action='store_true', help='Whether to use SAM for semantic guidance. If not set, a placeholder attention will be used.')
+    parser.add_argument('--precomputed_masks_dir', type=str, default=None, help='Directory containing precomputed SAM masks (to speed up training)')
     parser.add_argument('--semantic_loss_weight', type=float, default=0.3, help='Weight for semantic loss')
     parser.add_argument('--epochs', type=int, default=args.epochs, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=args.batch_size, help='Batch size')
@@ -68,7 +69,19 @@ def train(image_lists, opt):
     # Create SAM guidance for loss computation (only if using SAM)
     if opt.use_sam:
         print("Training with SAM semantic guidance")
-        sam_guidance = SAMGuidance(sam_checkpoint=opt.sam_checkpoint, model_type=opt.sam_model_type)
+        if opt.precomputed_masks_dir:
+            print(f"Using precomputed masks from {opt.precomputed_masks_dir}")
+            sam_guidance = SAMGuidance(
+                sam_checkpoint=opt.sam_checkpoint,
+                model_type=opt.sam_model_type,
+                precomputed_masks_dir=opt.precomputed_masks_dir
+            )
+        else:
+            print("Computing SAM masks on-the-fly (this will be slow)")
+            sam_guidance = SAMGuidance(
+                sam_checkpoint=opt.sam_checkpoint,
+                model_type=opt.sam_model_type
+            )
         sam_guidance.cuda()
     else:
         print("Training WITHOUT SAM semantic guidance (using placeholder attention)")
@@ -251,11 +264,25 @@ def main():
     # Parse arguments
     opt = parse_args()
     
-    # Get training images
-    images_path = utils.list_images(opt.dataset_path)
-    train_num = opt.train_num 
-    images_path = images_path[:train_num]
-    random.shuffle(images_path)
+    # Print training settings
+    print(f"Training settings:")
+    print(f"  SAM checkpoint: {opt.sam_checkpoint}")
+    print(f"  SAM model type: {opt.sam_model_type}")
+    print(f"  Using SAM: {opt.use_sam}")
+    print(f"  Using precomputed masks: {'Yes - ' + opt.precomputed_masks_dir if opt.precomputed_masks_dir else 'No'}")
+    print(f"  Epochs: {opt.epochs}")
+    print(f"  Batch size: {opt.batch_size}")
+    print(f"  Learning rate: {opt.learning_rate}")
+    
+    # Load the training dataset
+    print(f"Loading training data from {opt.dataset_path}")
+    images_path = dataset.get_training_data(opt.dataset_path)
+    
+    if len(images_path) == 0:
+        print(f"No training images found in {opt.dataset_path}")
+        exit(1)
+    
+    print(f"Found {len(images_path)} training images")
     
     # Start training
     train(images_path, opt)
