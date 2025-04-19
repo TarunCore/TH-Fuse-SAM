@@ -26,24 +26,12 @@ class SAMGuidance(nn.Module):
         self.guidance_conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
         self.guidance_bn3 = nn.BatchNorm2d(64)
         
-    def get_sam_masks(self, ir_img, vi_img):
+    def get_sam_mask(self, vi_img):
         """
-        Generate SAM masks for both infrared and visible images
-        Returns semantic segmentation masks
+        Generate SAM mask for visible image
+        Returns semantic segmentation mask
         """
         # Convert to numpy for SAM if needed
-        if isinstance(ir_img, torch.Tensor):
-            # Handle single-channel grayscale images (B, 1, H, W)
-            if ir_img.dim() == 4 and ir_img.shape[1] == 1:
-                # Convert to (B, H, W) then to (H, W, 3) for SAM
-                ir_np = ir_img.squeeze(1).detach().cpu().numpy()[0]  # Take the first batch item
-                ir_np = np.repeat(ir_np[:, :, np.newaxis], 3, axis=2)  # (H, W) -> (H, W, 3)
-            else:
-                # Use a simple fallback to generate a placeholder mask
-                print("Warning: Unexpected IR image format. Using placeholder mask.")
-                h, w = ir_img.shape[-2], ir_img.shape[-1]
-                ir_np = np.ones((h, w, 3), dtype=np.uint8) * 128
-        
         if isinstance(vi_img, torch.Tensor):
             # Handle single-channel grayscale images (B, 1, H, W)
             if vi_img.dim() == 4 and vi_img.shape[1] == 1:
@@ -57,31 +45,12 @@ class SAMGuidance(nn.Module):
                 vi_np = np.ones((h, w, 3), dtype=np.uint8) * 128
         
         # Normalize if needed
-        if ir_np.max() <= 1.0:
-            ir_np = (ir_np * 255).astype(np.uint8)
-        else:
-            ir_np = ir_np.astype(np.uint8)
-            
         if vi_np.max() <= 1.0:
             vi_np = (vi_np * 255).astype(np.uint8)
         else:
             vi_np = vi_np.astype(np.uint8)
         
         # Get masks using SAM in fully automatic mode
-        try:
-            self.predictor.set_image(ir_np)
-            ir_masks, _, _ = self.predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=None,
-                multimask_output=True
-            )
-        except Exception as e:
-            print(f"Error processing IR image with SAM: {e}")
-            # Create a fallback mask if SAM fails
-            h, w = ir_np.shape[:2]
-            ir_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
-        
         try:
             self.predictor.set_image(vi_np)
             vi_masks, _, _ = self.predictor.predict(
@@ -97,14 +66,12 @@ class SAMGuidance(nn.Module):
             vi_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
         
         # Combine masks to get the most informative ones
-        ir_mask = self.combine_masks(ir_masks)
         vi_mask = self.combine_masks(vi_masks)
         
         # Convert back to tensors
-        ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         
-        return ir_mask_tensor, vi_mask_tensor
+        return vi_mask_tensor
     
     def combine_masks(self, masks):
         """
@@ -132,18 +99,14 @@ class SAMGuidance(nn.Module):
     
     def forward(self, ir_img, vi_img):
         """
-        Generate semantic guidance weights from IR and VI images
+        Generate semantic guidance weights from VI image only
         """
-        ir_mask, vi_mask = self.get_sam_masks(ir_img, vi_img)
+        vi_mask = self.get_sam_mask(vi_img)
         
-        # Process masks through guidance network
-        ir_guidance = self.process_guidance(ir_mask)
+        # Process mask through guidance network
         vi_guidance = self.process_guidance(vi_mask)
         
-        # Combine guidance from both modalities
-        combined_guidance = ir_guidance + vi_guidance
-        
-        # Generate attention map (range 0-1)
-        semantic_attention = torch.sigmoid(combined_guidance)
+        # Use only VI guidance
+        semantic_attention = torch.sigmoid(vi_guidance)
         
         return semantic_attention 

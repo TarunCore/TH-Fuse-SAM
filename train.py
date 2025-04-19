@@ -139,14 +139,14 @@ def train(image_lists, opt):
             
             # Semantic loss computation (only if using SAM)
             if opt.use_sam and sam_guidance is not None:
-                # Get semantic attention maps for loss computation
-                semantic_attention = sam_guidance(img_ir, img_vi)
+                # Get semantic attention maps for loss computation (now only using visible image)
+                semantic_attention = sam_guidance(img_ir, img_vi)  # Note: IR image is still passed but not used
                 
                 # Resize outputs to match semantic_attention if needed
                 resized_outputs = F.interpolate(outputs, size=semantic_attention.shape[2:], mode='bilinear', align_corners=True)
                 
-                # Generate semantic attention for fused image
-                fused_semantic = sam_guidance(resized_outputs, resized_outputs)
+                # Generate semantic attention for fused image (now only using fused image)
+                fused_semantic = sam_guidance(resized_outputs, resized_outputs)  # Using the same image for both parameters
                 
                 # Calculate semantic consistency loss
                 semantic_loss_value = semantic_loss(fused_semantic, semantic_attention, semantic_attention)
