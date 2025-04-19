@@ -16,17 +16,15 @@ class SAMGuidance(nn.Module):
         self.precomputed_masks_dir = precomputed_masks_dir
         self.device = device
         
-        # Only load SAM model if we're not using precomputed masks
-        if precomputed_masks_dir is None:
-            print("Loading SAM model for on-the-fly mask generation")
-            # Load SAM model
-            self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-            self.sam.to(device=device)
-            self.predictor = SamPredictor(self.sam)
-        else:
-            print(f"Using precomputed masks from {precomputed_masks_dir}")
-            self.sam = None
-            self.predictor = None
+        # Always load SAM model since we need it for IR mask generation
+        print("Loading SAM model for IR mask generation")
+        # Load SAM model
+        self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        self.sam.to(device=device)
+        self.predictor = SamPredictor(self.sam)
+        
+        if precomputed_masks_dir is not None:
+            print(f"Using precomputed visible masks from {precomputed_masks_dir}/vi")
         
         # Guidance network
         self.guidance_conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
@@ -41,40 +39,26 @@ class SAMGuidance(nn.Module):
         Generate SAM masks for both infrared and visible images
         Returns semantic segmentation masks
         """
-        # Try to use precomputed masks if available
+        # Initialize with None
+        ir_mask_tensor = None
+        vi_mask_tensor = None
+        
+        # Try to use precomputed mask for visible image if available
         if self.precomputed_masks_dir is not None:
             # Get filenames from tensor metadata or create a placeholder
-            if hasattr(ir_img, 'filename') and hasattr(vi_img, 'filename'):
-                ir_filename = ir_img.filename
-                vi_filename = vi_img.filename
+            if hasattr(vi_img, 'filenames'):
+                vi_filename = vi_img.filenames[0]  # Get first filename from batch
                 
-                # Load precomputed masks
-                ir_mask_path = os.path.join(self.precomputed_masks_dir, 'ir', f"{ir_filename}.npy")
+                # Load precomputed visible mask
                 vi_mask_path = os.path.join(self.precomputed_masks_dir, 'vi', f"{vi_filename}.npy")
                 
-                if os.path.exists(ir_mask_path) and os.path.exists(vi_mask_path):
-                    ir_mask = np.load(ir_mask_path)
+                if os.path.exists(vi_mask_path):
                     vi_mask = np.load(vi_mask_path)
                     
-                    # Convert to tensors
-                    ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+                    # Convert to tensor
                     vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
-                    
-                    return ir_mask_tensor, vi_mask_tensor
-            
-            # If we couldn't load precomputed masks, fall back to generated placeholder masks
-            print("Warning: Could not load precomputed masks, using placeholder masks")
-            h, w = ir_img.shape[-2], ir_img.shape[-1]
-            ir_mask = np.ones((h, w), dtype=np.float32) * 0.5
-            vi_mask = np.ones((h, w), dtype=np.float32) * 0.5
-            
-            ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
-            vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
-            
-            return ir_mask_tensor, vi_mask_tensor
-            
-        # Original on-the-fly mask generation
-        # Convert to numpy for SAM if needed
+        
+        # Convert IR image to numpy for SAM
         if isinstance(ir_img, torch.Tensor):
             # Handle single-channel grayscale images (B, 1, H, W)
             if ir_img.dim() == 4 and ir_img.shape[1] == 1:
@@ -87,30 +71,13 @@ class SAMGuidance(nn.Module):
                 h, w = ir_img.shape[-2], ir_img.shape[-1]
                 ir_np = np.ones((h, w, 3), dtype=np.uint8) * 128
         
-        if isinstance(vi_img, torch.Tensor):
-            # Handle single-channel grayscale images (B, 1, H, W)
-            if vi_img.dim() == 4 and vi_img.shape[1] == 1:
-                # Convert to (B, H, W) then to (H, W, 3) for SAM
-                vi_np = vi_img.squeeze(1).detach().cpu().numpy()[0]  # Take the first batch item
-                vi_np = np.repeat(vi_np[:, :, np.newaxis], 3, axis=2)  # (H, W) -> (H, W, 3)
-            else:
-                # Use a simple fallback to generate a placeholder mask
-                print("Warning: Unexpected VI image format. Using placeholder mask.")
-                h, w = vi_img.shape[-2], vi_img.shape[-1]
-                vi_np = np.ones((h, w, 3), dtype=np.uint8) * 128
-        
         # Normalize if needed
         if ir_np.max() <= 1.0:
             ir_np = (ir_np * 255).astype(np.uint8)
         else:
             ir_np = ir_np.astype(np.uint8)
-            
-        if vi_np.max() <= 1.0:
-            vi_np = (vi_np * 255).astype(np.uint8)
-        else:
-            vi_np = vi_np.astype(np.uint8)
         
-        # Get masks using SAM in fully automatic mode
+        # Generate IR mask on-the-fly
         try:
             self.predictor.set_image(ir_np)
             ir_masks, _, _ = self.predictor.predict(
@@ -119,33 +86,55 @@ class SAMGuidance(nn.Module):
                 box=None,
                 multimask_output=True
             )
+            # Combine masks
+            ir_mask = self.combine_masks(ir_masks)
+            # Convert to tensor
+            ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         except Exception as e:
             print(f"Error processing IR image with SAM: {e}")
             # Create a fallback mask if SAM fails
             h, w = ir_np.shape[:2]
-            ir_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
+            ir_mask = np.ones((h, w), dtype=np.float32) * 0.5
+            ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         
-        try:
-            self.predictor.set_image(vi_np)
-            vi_masks, _, _ = self.predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=None,
-                multimask_output=True
-            )
-        except Exception as e:
-            print(f"Error processing VI image with SAM: {e}")
-            # Create a fallback mask if SAM fails
-            h, w = vi_np.shape[:2]
-            vi_masks = [np.ones((h, w), dtype=np.float32) * 0.5]
-        
-        # Combine masks to get the most informative ones
-        ir_mask = self.combine_masks(ir_masks)
-        vi_mask = self.combine_masks(vi_masks)
-        
-        # Convert back to tensors
-        ir_mask_tensor = torch.from_numpy(ir_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
-        vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+        # If we don't have a precomputed visible mask, generate one on-the-fly
+        if vi_mask_tensor is None:
+            if isinstance(vi_img, torch.Tensor):
+                # Handle single-channel grayscale images (B, 1, H, W)
+                if vi_img.dim() == 4 and vi_img.shape[1] == 1:
+                    # Convert to (B, H, W) then to (H, W, 3) for SAM
+                    vi_np = vi_img.squeeze(1).detach().cpu().numpy()[0]  # Take the first batch item
+                    vi_np = np.repeat(vi_np[:, :, np.newaxis], 3, axis=2)  # (H, W) -> (H, W, 3)
+                else:
+                    # Use a simple fallback to generate a placeholder mask
+                    print("Warning: Unexpected VI image format. Using placeholder mask.")
+                    h, w = vi_img.shape[-2], vi_img.shape[-1]
+                    vi_np = np.ones((h, w, 3), dtype=np.uint8) * 128
+            
+            # Normalize if needed
+            if vi_np.max() <= 1.0:
+                vi_np = (vi_np * 255).astype(np.uint8)
+            else:
+                vi_np = vi_np.astype(np.uint8)
+            
+            try:
+                self.predictor.set_image(vi_np)
+                vi_masks, _, _ = self.predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=None,
+                    multimask_output=True
+                )
+                # Combine masks
+                vi_mask = self.combine_masks(vi_masks)
+                # Convert to tensor
+                vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
+            except Exception as e:
+                print(f"Error processing VI image with SAM: {e}")
+                # Create a fallback mask if SAM fails
+                h, w = vi_np.shape[:2]
+                vi_mask = np.ones((h, w), dtype=np.float32) * 0.5
+                vi_mask_tensor = torch.from_numpy(vi_mask).float().unsqueeze(0).unsqueeze(0).to(self.device)
         
         return ir_mask_tensor, vi_mask_tensor
     

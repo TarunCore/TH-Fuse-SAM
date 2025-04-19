@@ -1,23 +1,25 @@
-# Precomputing SAM Masks
+# Precomputing SAM Masks for Visible Images
 
-This README explains how to precompute Segment Anything Model (SAM) masks to significantly speed up training time for the TH-Fuse-SAM model.
+This README explains how to precompute Segment Anything Model (SAM) masks for **visible images only** to significantly speed up training time for the TH-Fuse-SAM model.
 
 ## Why Precompute Masks?
 
-SAM is a powerful segmentation model, but it's computationally expensive to run during training. By precomputing the masks for your dataset, you can:
+SAM is a powerful segmentation model, but it's computationally expensive to run during training. By precomputing the masks for visible images in your dataset, you can:
 
-1. Reduce training time by 70-90%
+1. Reduce training time by 50-70%
 2. Lower GPU memory requirements
 3. Maintain the same quality of results
+
+The IR (infrared) masks are still computed on-the-fly during training, as they're often simpler and faster to process.
 
 ## Prerequisites
 
 - SAM model checkpoint (e.g., `sam_vit_h_4b8939.pth`)
 - Your training dataset with IR and VI images
 
-## Step 1: Precompute the Masks
+## Step 1: Precompute the Masks for Visible Images
 
-Use the `precompute_masks.py` script to generate masks for all images in your dataset:
+Use the `precompute_masks.py` script to generate masks for all visible images in your dataset:
 
 ```bash
 python precompute_masks.py \
@@ -28,15 +30,15 @@ python precompute_masks.py \
 ```
 
 This will:
-1. Load each IR/VI image pair
-2. Run SAM to generate masks
+1. Load each visible image from your dataset
+2. Run SAM to generate masks for visible images only
 3. Save the masks as .npy files in the output directory
 
-The process might take a while (a few hours for large datasets), but you only need to do it once.
+The process might take a while but is much faster than precomputing masks for both modalities.
 
 ## Step 2: Train with Precomputed Masks
 
-Once you have precomputed the masks, you can use them during training:
+Once you have precomputed the visible masks, you can use them during training:
 
 ```bash
 python train.py \
@@ -48,7 +50,7 @@ python train.py \
   --epochs 100
 ```
 
-The training will use the precomputed masks instead of running SAM during each iteration.
+The training will use the precomputed masks for visible images, while still computing IR masks on-the-fly.
 
 ## Step 3: Test with Precomputed Masks
 
@@ -73,23 +75,21 @@ python test.py \
 The precomputed masks are saved in the following structure:
 ```
 precomputed_masks/
-  ├── ir/
-  │   ├── image1.npy
-  │   ├── image2.npy
-  │   └── ...
   └── vi/
       ├── image1.npy
       ├── image2.npy
       └── ...
 ```
 
+Note that only visible image masks are precomputed; IR masks are computed during training.
+
 ### Memory Requirements
 
-The precomputed masks can take up significant disk space (a few GB for large datasets). Make sure you have enough storage available.
+The precomputed masks can take up disk space, but much less than if you were storing both IR and visible masks. Make sure you have enough storage available.
 
 ### Fallback Mechanism
 
-If a precomputed mask is not found for a specific image, the system will fallback to generating a placeholder mask (not running SAM on-the-fly). This ensures training continues even if some masks are missing.
+If a precomputed mask is not found for a specific visible image, the system will fallback to generating it on-the-fly. This ensures training continues even if some masks are missing.
 
 ### Windows-Specific Notes
 
@@ -99,7 +99,7 @@ For Windows users:
 
 ## Performance Comparison
 
-Using precomputed masks typically provides the following improvements:
-- Training speed: 4-10x faster
-- GPU memory usage: 30-50% less
+Using precomputed visible masks typically provides the following improvements:
+- Training speed: 2-3x faster
+- GPU memory usage: 20-30% less
 - Results quality: Identical to on-the-fly computation

@@ -19,7 +19,7 @@ def load_dataset(image_path, BATCH_SIZE, num_imgs=None):
 
 def get_training_data(dataset_path):
     """Get list of image paths for training"""
-    ir_dir = os.path.join(dataset_path, 'ir')
+    ir_dir = os.path.join(dataset_path, 'lwir')
     if not os.path.exists(ir_dir):
         raise ValueError(f"IR image directory not found: {ir_dir}")
     

@@ -68,7 +68,7 @@ def main():
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, 'ir'), exist_ok=True)
+    # Only create vi directory since we're only precomputing visible masks
     os.makedirs(os.path.join(args.output_dir, 'vi'), exist_ok=True)
     
     # Load SAM model
@@ -77,41 +77,39 @@ def main():
     sam.to(device=args.device)
     predictor = SamPredictor(sam)
     
-    # Get dataset paths
-    image_list = get_training_data(args.dataset_path)
-    print(f"Found {len(image_list)} images in dataset")
+    # Get dataset paths (IR images)
+    ir_image_list = get_training_data(args.dataset_path)
+    print(f"Found {len(ir_image_list)} IR images in dataset")
     
-    # Process each image pair
-    for img_path in tqdm(image_list):
+    # Process each visible image corresponding to an IR image
+    for ir_path in tqdm(ir_image_list):
         # Extract filename without extension
-        filename = os.path.basename(img_path).split('.')[0]
+        filename = os.path.basename(ir_path).split('.')[0]
         
-        # Load IR and VI images
-        ir_img = utils.get_img(img_path, 'L')
-        vi_img = utils.get_img(img_path.replace('/ir/', '/vi/'), 'L')
+        # Get corresponding visible image path
+        vi_path = ir_path.replace('/lwir/', '/visible/')
+        if not os.path.exists(vi_path):
+            print(f"Warning: Corresponding visible image not found: {vi_path}")
+            continue
+        
+        # Load visible image only
+        vi_img, _ = utils.get_img(vi_path, 'L')
         
         # Convert to numpy arrays in format expected by SAM (H, W, 3)
-        ir_np = np.array(ir_img)
         vi_np = np.array(vi_img)
         
         # Ensure it's 3-channel for SAM
-        if len(ir_np.shape) == 2:
-            ir_np = np.repeat(ir_np[:, :, np.newaxis], 3, axis=2)
         if len(vi_np.shape) == 2:
             vi_np = np.repeat(vi_np[:, :, np.newaxis], 3, axis=2)
         
-        # Generate masks
-        ir_mask = get_sam_mask(predictor, ir_np)
+        # Generate mask for visible image only
         vi_mask = get_sam_mask(predictor, vi_np)
         
-        # Save masks
-        ir_mask_path = os.path.join(args.output_dir, 'ir', f"{filename}.npy")
+        # Save visible image mask only
         vi_mask_path = os.path.join(args.output_dir, 'vi', f"{filename}.npy")
-        
-        np.save(ir_mask_path, ir_mask)
         np.save(vi_mask_path, vi_mask)
     
-    print(f"Precomputed masks saved to {args.output_dir}")
+    print(f"Precomputed visible image masks saved to {args.output_dir}/vi")
 
 if __name__ == "__main__":
     main() 
